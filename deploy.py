@@ -6,6 +6,7 @@ import tempfile
 import shutil
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+from config import AWS_CONFIG, LAMBDA_CONFIG, S3_CONFIG, EVENTBRIDGE_CONFIG
 
 class LambdaDeployer:
     def __init__(self):
@@ -13,17 +14,24 @@ class LambdaDeployer:
         load_dotenv()
         
         # Configuration
-        self.function_name = "finnhub-stock-data"
-        self.role_name = "lambda-finnhub-role"
-        self.s3_bucket = "finnhub-stock-data"
-        self.schedule_rule_name = "finnhub-data-schedule"
-        self.schedule_expression = "rate(1 hour)"
+        self.function_name = LAMBDA_CONFIG['function_name']
+        self.role_name = LAMBDA_CONFIG['role_name']
+        self.s3_bucket = S3_CONFIG['bucket_name']
+        self.schedule_rule_name = EVENTBRIDGE_CONFIG['rule_name']
+        self.schedule_expression = EVENTBRIDGE_CONFIG['schedule_expression']
         
-        # Initialize AWS clients
-        self.lambda_client = boto3.client('lambda')
-        self.iam = boto3.client('iam')
-        self.events = boto3.client('events')
-        self.sts = boto3.client('sts')
+        # Initialize AWS clients with explicit credentials
+        self.session = boto3.Session(
+            aws_access_key_id=AWS_CONFIG['aws_access_key_id'],
+            aws_secret_access_key=AWS_CONFIG['aws_secret_access_key'],
+            region_name=AWS_CONFIG['region_name']
+        )
+        
+        self.lambda_client = self.session.client('lambda')
+        self.iam = self.session.client('iam')
+        self.events = self.session.client('events')
+        self.sts = self.session.client('sts')
+        self.s3 = self.session.client('s3')
         
         # Get account ID
         self.account_id = self.sts.get_caller_identity()["Account"]
@@ -138,11 +146,11 @@ class LambdaDeployer:
             # Update function configuration
             self.lambda_client.update_function_configuration(
                 FunctionName=self.function_name,
-                Runtime='python3.9',
-                Handler='lambda_function.lambda_handler',
+                Runtime=LAMBDA_CONFIG['runtime'],
+                Handler=LAMBDA_CONFIG['handler'],
                 Role=role_arn,
-                Timeout=30,
-                MemorySize=128,
+                Timeout=LAMBDA_CONFIG['timeout'],
+                MemorySize=LAMBDA_CONFIG['memory_size'],
                 Environment={
                     'Variables': {
                         'FINNHUB_API_KEY': os.getenv('FINNHUB_API_KEY')
@@ -155,12 +163,12 @@ class LambdaDeployer:
                 print("Creating new Lambda function...")
                 self.lambda_client.create_function(
                     FunctionName=self.function_name,
-                    Runtime='python3.9',
-                    Handler='lambda_function.lambda_handler',
+                    Runtime=LAMBDA_CONFIG['runtime'],
+                    Handler=LAMBDA_CONFIG['handler'],
                     Role=role_arn,
                     Code={'ZipFile': zip_bytes},
-                    Timeout=30,
-                    MemorySize=128,
+                    Timeout=LAMBDA_CONFIG['timeout'],
+                    MemorySize=LAMBDA_CONFIG['memory_size'],
                     Environment={
                         'Variables': {
                             'FINNHUB_API_KEY': os.getenv('FINNHUB_API_KEY')
@@ -187,7 +195,7 @@ class LambdaDeployer:
                 StatementId='EventBridgeInvoke',
                 Action='lambda:InvokeFunction',
                 Principal='events.amazonaws.com',
-                SourceArn=f'arn:aws:events:{os.getenv("AWS_DEFAULT_REGION")}:{self.account_id}:rule/{self.schedule_rule_name}'
+                SourceArn=f'arn:aws:events:{AWS_CONFIG["region_name"]}:{self.account_id}:rule/{self.schedule_rule_name}'
             )
         except ClientError as e:
             if e.response['Error']['Code'] != 'ResourceConflictException':
@@ -198,14 +206,39 @@ class LambdaDeployer:
             Rule=self.schedule_rule_name,
             Targets=[{
                 'Id': '1',
-                'Arn': f'arn:aws:lambda:{os.getenv("AWS_DEFAULT_REGION")}:{self.account_id}:function:{self.function_name}'
+                'Arn': f'arn:aws:lambda:{AWS_CONFIG["region_name"]}:{self.account_id}:function:{self.function_name}'
             }]
         )
         
+    def create_s3_bucket(self):
+        """Create S3 bucket if it doesn't exist"""
+        print("Setting up S3 bucket...")
+        try:
+            # Check if bucket exists
+            self.s3.head_bucket(Bucket=self.s3_bucket)
+            print(f"S3 bucket '{self.s3_bucket}' already exists")
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            if error_code == '404':
+                # Bucket doesn't exist, create it
+                print(f"Creating S3 bucket '{self.s3_bucket}'...")
+                self.s3.create_bucket(
+                    Bucket=self.s3_bucket,
+                    CreateBucketConfiguration={
+                        'LocationConstraint': AWS_CONFIG['region_name']
+                    }
+                )
+                print(f"S3 bucket '{self.s3_bucket}' created successfully")
+            else:
+                raise
+
     def deploy(self):
         """Main deployment process"""
         try:
             print("Starting deployment process...")
+            
+            # Create S3 bucket first
+            self.create_s3_bucket()
             
             # Create deployment package
             zip_path = self.create_zip_package()
