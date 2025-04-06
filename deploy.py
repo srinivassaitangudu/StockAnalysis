@@ -7,6 +7,7 @@ import shutil
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from config import AWS_CONFIG, LAMBDA_CONFIG, S3_CONFIG, EVENTBRIDGE_CONFIG
+import time
 
 class LambdaDeployer:
     def __init__(self):
@@ -127,6 +128,22 @@ class LambdaDeployer:
         
         return response['Role']['Arn']
         
+    def wait_for_lambda_update(self):
+        """Wait for any in-progress Lambda function updates to complete"""
+        print("Waiting for any in-progress Lambda updates to complete...")
+        while True:
+            try:
+                response = self.lambda_client.get_function(FunctionName=self.function_name)
+                if response['Configuration']['LastUpdateStatus'] == 'Successful':
+                    break
+                elif response['Configuration']['LastUpdateStatus'] == 'Failed':
+                    raise Exception("Lambda function update failed")
+                time.sleep(5)  # Wait 5 seconds before checking again
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                    break  # Function doesn't exist yet, no need to wait
+                raise
+
     def deploy_lambda(self, role_arn, zip_path):
         """Deploy or update Lambda function"""
         with open(zip_path, 'rb') as zip_file:
@@ -137,11 +154,17 @@ class LambdaDeployer:
             self.lambda_client.get_function(FunctionName=self.function_name)
             
             print("Updating existing Lambda function...")
+            # Wait for any in-progress updates
+            self.wait_for_lambda_update()
+            
             # Update function code
             self.lambda_client.update_function_code(
                 FunctionName=self.function_name,
                 ZipFile=zip_bytes
             )
+            
+            # Wait for code update to complete
+            self.wait_for_lambda_update()
             
             # Update function configuration
             self.lambda_client.update_function_configuration(
@@ -222,12 +245,17 @@ class LambdaDeployer:
             if error_code == '404':
                 # Bucket doesn't exist, create it
                 print(f"Creating S3 bucket '{self.s3_bucket}'...")
-                self.s3.create_bucket(
-                    Bucket=self.s3_bucket,
-                    CreateBucketConfiguration={
-                        'LocationConstraint': AWS_CONFIG['region_name']
-                    }
-                )
+                if AWS_CONFIG['region_name'] == 'us-east-1':
+                    # For us-east-1, don't specify LocationConstraint
+                    self.s3.create_bucket(Bucket=self.s3_bucket)
+                else:
+                    # For other regions, specify LocationConstraint
+                    self.s3.create_bucket(
+                        Bucket=self.s3_bucket,
+                        CreateBucketConfiguration={
+                            'LocationConstraint': AWS_CONFIG['region_name']
+                        }
+                    )
                 print(f"S3 bucket '{self.s3_bucket}' created successfully")
             else:
                 raise
@@ -248,7 +276,6 @@ class LambdaDeployer:
             
             # Wait for role to be ready (IAM propagation)
             print("Waiting for IAM role to be ready...")
-            import time
             time.sleep(10)
             
             # Deploy Lambda function

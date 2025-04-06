@@ -5,6 +5,9 @@ setup_credentials.py
 test_credentials.py
 
 # Python
+setup_credentials.py
+test_credentials.py
+.ipynb_checkpoints/
 __pycache__/
 *.py[cod]
 *$py.class
